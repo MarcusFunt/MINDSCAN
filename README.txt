@@ -6,3 +6,5 @@ Scanning and
 Cognitive
 Assessment of
 Neural patterns
+
+pip install pillow
