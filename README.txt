@@ -9,8 +9,7 @@ Neural patterns
 
 pip install pillow
 pip install bleak
-<<<<<<< HEAD
-=======
+
 
 import uuid
 print(str(uuid.uuid4()))
