@@ -9,6 +9,7 @@ Neural patterns
 
 pip install pillow
 pip install bleak
+pip install PyQt5 opencv-python numpy
 
 
 import uuid
