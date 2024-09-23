@@ -8,3 +8,4 @@ Assessment of
 Neural patterns
 
 pip install pillow
+pip install bleak
