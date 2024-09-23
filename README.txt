@@ -8,3 +8,7 @@ Assessment of
 Neural patterns
 
 pip install pillow
+pip install bleak
+
+import uuid
+print(str(uuid.uuid4()))
