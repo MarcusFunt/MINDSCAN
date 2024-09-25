@@ -7,11 +7,9 @@ Cognitive
 Assessment of
 Neural patterns
 
-pip install pillow
-pip install bleak
-pip install PyQt5 opencv-python numpy
+pip install numpy pillow bleak PyQt5 opencv-python 
+
 
 
 import uuid
 print(str(uuid.uuid4()))
->>>>>>> 9730f25f442b635d38ef2aa73613db67ab68b9a8

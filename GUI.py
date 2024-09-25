@@ -190,16 +190,16 @@ class MainWindow(QMainWindow):
         self.next_image()
 
     def next_image(self):
-        if self.current_image_index >= len(self.image_paths) and self.state == 'image':
-            # Experiment finished
-            self.display_end_screen()
-            return
-
         if self.state == 'image':
+            if self.current_image_index >= len(self.image_paths):
+                # Experiment finished
+                self.display_end_screen()
+                return
+
             # Display current image
             image_path = self.image_paths[self.current_image_index]
             self.display_image(image_path)
-            # Increment image index for next call
+            # Increment image index for next image
             self.current_image_index += 1
             # Set state to 'pause' for next call
             self.state = 'pause'
@@ -208,10 +208,9 @@ class MainWindow(QMainWindow):
             if self.pause_image_path:
                 self.display_image(self.pause_image_path)
             else:
-                # If no pause image, proceed directly to next image
-                self.state = 'image'
-                self.next_image()
-                return
+                # Display a blank screen if pause image is not available
+                self.image_label.clear()
+                self.image_label.setStyleSheet("background-color: black;")
             # Set state to 'image' for next call
             self.state = 'image'
 
