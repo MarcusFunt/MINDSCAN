@@ -1,278 +1,221 @@
-import sys
+import pygame
 import os
-import random
-import cv2
-import numpy as np
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QLabel, QPushButton, QComboBox, QVBoxLayout, QWidget, QMessageBox, QSizePolicy
-)
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPixmap, QImage
 
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
+# Initialize Pygame
+pygame.init()
 
-        # Store user diagnosis selections
-        self.diagnoses = []
+# Set screen to fullscreen mode
+screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+screen_width, screen_height = screen.get_size()  # Get the actual screen dimensions
+pygame.display.set_caption("MINDSCAN")
 
-        # Initialize the UI
-        self.initUI()
+# Font setup
+font = pygame.font.SysFont('Arial', 24)
+large_font = pygame.font.SysFont('Arial', 36)
 
-    def initUI(self):
-        self.setWindowTitle('MINDSCAN')
+# Diagnosis list
+diagnosis_list = [
+    'Depression', 'Anxiety', 'Aspergers Syndrome', 'Non-Aspergers Autism',
+    'ADD/ADHD', 'Dementia', 'Bipolar 1/2', 'Schizoid', 'Eating Disorder',
+    'Antisocial', 'NONE'
+]
 
-        # Central widget
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
+# Variables for dropdowns
+dropdowns = [{'rect': pygame.Rect(50, 100, 300, 40), 'open': False, 'selection': 'Select Diagnosis'}]
+selected_diagnoses = []
+max_dropdowns = 5
 
-        # Layout
-        self.layout = QVBoxLayout()
-        self.central_widget.setLayout(self.layout)
+# Images setup
+image_folder = "images/EmoPics"  # Update this path as needed
+images = sorted([f for f in os.listdir(image_folder) if f.lower().endswith('.jpg')])
+total_images = len(images)
+current_image_index = 0
 
-        # Instructions label
-        self.instructions_label = QLabel('Please select your diagnosis (up to 5):')
-        self.instructions_label.setAlignment(Qt.AlignCenter)
-        self.layout.addWidget(self.instructions_label)
+# Function to scale images while maintaining aspect ratio
+def scale_image_to_screen(image, screen_width, screen_height):
+    image_width, image_height = image.get_size()
+    scale_factor = min(screen_width / image_width, screen_height / image_height)
+    new_width = int(image_width * scale_factor)
+    new_height = int(image_height * scale_factor)
+    scaled_image = pygame.transform.scale(image, (new_width, new_height))
+    return scaled_image
 
-        # List of diagnoses
-        self.diagnosis_list = [
-            'Depression', 'Anxiety', 'Aspergers Syndrome', 'Non-Aspergers Autism',
-            'ADD/ADHD', 'Dementia', 'Bipolar 1/2', 'Schizoid', 'Eating Disorder',
-            'Antisocial', 'NONE'
-        ]
+# Load EmoPics images and scale them
+def load_image(index):
+    if images and index < len(images):
+        img_path = os.path.join(image_folder, images[index])
+        try:
+            image = pygame.image.load(img_path).convert_alpha()
+            return scale_image_to_screen(image, screen_width, screen_height)
+        except pygame.error as e:
+            print(f"Unable to load image {img_path}: {e}")
+            return None
+    return None
 
-        # List to hold the dropdowns
-        self.dropdown_list = []
-        self.create_diagnosis_dropdown()
+# Load and scale pause image
+pause_image_path = "images/pause.png"  # Update this path as needed
+try:
+    pause_image = pygame.image.load(pause_image_path).convert_alpha()
+    pause_image = scale_image_to_screen(pause_image, screen_width, screen_height)
+except pygame.error as e:
+    print(f"Unable to load pause image {pause_image_path}: {e}")
+    pause_image = None  # Handle gracefully if pause image fails to load
 
-        # Start button
-        self.start_button = QPushButton('Start')
-        self.start_button.clicked.connect(self.start_experiment)
-        self.layout.addWidget(self.start_button)
+# Function to draw the start menu
+def draw_start_menu():
+    screen.fill((18, 18, 18))  # Dark background
 
-        # Set the layout alignment
-        self.layout.setAlignment(Qt.AlignCenter)
+    # Title
+    title_text = large_font.render("Select your diagnoses (up to 5):", True, (255, 255, 255))
+    title_rect = title_text.get_rect(topleft=(50, 50))
+    screen.blit(title_text, title_rect)
 
-        # Apply stylesheets for a modern look and dark mode
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #121212;
-                color: #FFFFFF;
-            }
-            QLabel {
-                font-size: 24px;
-                color: #FFFFFF;
-            }
-            QPushButton {
-                font-size: 18px;
-                padding: 10px;
-                background-color: #1E1E1E;
-                color: #FFFFFF;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #2A2A2A;
-            }
-            QComboBox {
-                font-size: 18px;
-                padding: 5px;
-                background-color: #1E1E1E;
-                color: #FFFFFF;
-                border: none;
-                selection-background-color: #2A2A2A;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1E1E1E;
-                color: #FFFFFF;
-                selection-background-color: #2A2A2A;
-            }
-            QScrollBar:vertical {
-                background: #121212;
-                width: 15px;
-            }
-            QScrollBar::handle:vertical {
-                background: #1E1E1E;
-            }
-        """)
+    # Draw each dropdown
+    for dropdown in dropdowns:
+        # Draw the dropdown box
+        pygame.draw.rect(screen, (50, 50, 50), dropdown['rect'], border_radius=5)
 
-        # Set an initial window size and show the window
-        self.resize(800, 600)
-        self.show()
+        # Show selected diagnosis or default text
+        diagnosis_text = font.render(
+            dropdown['selection'],
+            True,
+            (255, 255, 255) if dropdown['selection'] != 'Select Diagnosis' else (150, 150, 150)
+        )
+        screen.blit(diagnosis_text, (dropdown['rect'].x + 10, dropdown['rect'].y + 7))
 
-    def create_diagnosis_dropdown(self):
-        if len(self.dropdown_list) < 5:
-            combo_box = QComboBox()
-            combo_box.addItems(['Select diagnosis'] + self.diagnosis_list)
-            combo_box.setCurrentIndex(0)
-            combo_box.currentIndexChanged.connect(self.diagnosis_selected)
-            self.layout.insertWidget(len(self.dropdown_list) + 1, combo_box)  # Insert before the start button
-            self.dropdown_list.append(combo_box)
+        # Draw dropdown options if open
+        if dropdown['open']:
+            for j, option in enumerate(diagnosis_list):
+                option_rect = pygame.Rect(dropdown['rect'].x, dropdown['rect'].y + (j + 1) * 40, 300, 40)
+                pygame.draw.rect(screen, (70, 70, 70), option_rect, border_radius=5)
+                option_text = font.render(option, True, (255, 255, 255))
+                screen.blit(option_text, (option_rect.x + 10, option_rect.y + 7))
 
-    def diagnosis_selected(self):
-        # Update self.diagnoses based on current selections
-        self.diagnoses = []
-        for combo_box in self.dropdown_list:
-            selection = combo_box.currentText()
-            if selection == 'Select diagnosis':
-                # Do nothing until a valid selection is made
-                return
-            if selection != 'NONE':
-                self.diagnoses.append(selection)
-            else:
-                break  # Stop processing further dropdowns if 'NONE' is selected
+    # Start button
+    start_button_width, start_button_height = 150, 50
+    start_button_rect = pygame.Rect(
+        screen_width - start_button_width - 50,
+        screen_height - start_button_height - 50,
+        start_button_width,
+        start_button_height
+    )
+    pygame.draw.rect(screen, (70, 130, 180), start_button_rect, border_radius=5)
+    start_text = font.render("Start", True, (255, 255, 255))
+    start_text_rect = start_text.get_rect(center=start_button_rect.center)
+    screen.blit(start_text, start_text_rect)
 
-        # Remove extra dropdowns if 'NONE' is selected
-        # Find the index of the first 'NONE' selection
-        none_index = None
-        for i, combo_box in enumerate(self.dropdown_list):
-            if combo_box.currentText() == 'NONE':
-                none_index = i
+    # Display pause image in the upper right corner if loaded
+    # Display pause image in the upper right corner
+    # Adjust the position to avoid overlapping the start button
+    pause_image_rect = pause_image.get_rect(topright=(screen_width - 250, 50))  # Move it further left if necessary
+    screen.blit(pause_image, pause_image_rect)
+
+
+    pygame.display.flip()
+    return start_button_rect
+
+# Function to handle dropdown interactions
+def handle_dropdown_click(index, mouse_pos):
+    dropdown = dropdowns[index]
+    if dropdown['rect'].collidepoint(mouse_pos):
+        dropdown['open'] = not dropdown['open']
+    elif dropdown['open']:
+        # Handle option selection when dropdown is open
+        for j, option in enumerate(diagnosis_list):
+            option_rect = pygame.Rect(dropdown['rect'].x, dropdown['rect'].y + (j + 1) * 40, 300, 40)
+            if option_rect.collidepoint(mouse_pos):
+                dropdown['selection'] = option
+                dropdown['open'] = False
+                update_dropdowns(index)
                 break
+        dropdown['open'] = False  # Close dropdown if clicked outside options
 
-        if none_index is not None:
-            # Remove all dropdowns after the 'NONE' selection
-            while len(self.dropdown_list) > none_index + 1:
-                combo_to_remove = self.dropdown_list.pop()
-                self.layout.removeWidget(combo_to_remove)
-                combo_to_remove.deleteLater()
-        else:
-            # If 'NONE' not selected and we have less than 5 dropdowns, create a new one
-            all_selected = all(cb.currentText() != 'Select diagnosis' for cb in self.dropdown_list)
-            if len(self.dropdown_list) < 5 and all_selected:
-                self.create_diagnosis_dropdown()
+# Function to update the dropdowns based on user selections
+def update_dropdowns(index):
+    selected_diagnoses.clear()
+    for dropdown in dropdowns:
+        selection = dropdown['selection']
+        if selection != 'Select Diagnosis' and selection != 'NONE':
+            selected_diagnoses.append(selection)
 
-    def start_experiment(self):
-        if not self.diagnoses and not any(cb.currentText() == 'NONE' for cb in self.dropdown_list):
-            # No diagnoses selected, show a message
-            QMessageBox.warning(self, 'No Diagnosis Selected', 'Please select at least one diagnosis to start.')
-            return
+    # Adjust dropdowns based on 'NONE' selection
+    if dropdowns[index]['selection'] == 'NONE':
+        dropdowns[:] = dropdowns[:index + 1]  # Remove extra dropdowns after 'NONE'
+    elif len(dropdowns) < max_dropdowns and all(d['selection'] != 'Select Diagnosis' for d in dropdowns):
+        new_y = 100 + len(dropdowns) * 50
+        dropdowns.append({'rect': pygame.Rect(50, new_y, 300, 40), 'open': False, 'selection': 'Select Diagnosis'})
 
-        # Hide start menu elements
-        self.instructions_label.hide()
-        for combo_box in self.dropdown_list:
-            combo_box.hide()
-        self.start_button.hide()
+# Main variables
+state = 'start'  # Can be 'start', 'experiment', or 'end'
 
-        # Prepare the experiment
-        # Load images from folders
-        self.image_paths = []
-        folders = ['NEG', 'NEUT', 'POS']
+# Main loop
+running = True
+while running:
+    if state == 'start':
+        start_button_rect = draw_start_menu()
+    elif state == 'experiment':
+        screen.fill((18, 18, 18))  # Dark background
 
-        for folder in folders:
-            folder_path = os.path.join('images', folder)
-            if not os.path.exists(folder_path):
-                continue
-            for filename in os.listdir(folder_path):
-                if filename.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp', '.gif')):
-                    self.image_paths.append(os.path.join(folder_path, filename))
-
-        # Shuffle images randomly
-        random.shuffle(self.image_paths)
-
-        # Load pause image
-        self.pause_image_path = os.path.join('images', 'pause.png')
-        if not os.path.exists(self.pause_image_path):
-            self.pause_image_path = None
-
-        # Image index
-        self.current_image_index = 0  # Start at 0
-
-        # QLabel to display images
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.layout.addWidget(self.image_label)
-
-        # Start the experiment
-        self.state = 'image'  # Start with displaying the first image
-        self.waiting_for_space = False
-        self.next_image()
-
-    def next_image(self):
-        if self.state == 'image':
-            if self.current_image_index >= len(self.image_paths):
-                # Experiment finished
-                self.display_end_screen()
-                return
-
-            # Display current image
-            image_path = self.image_paths[self.current_image_index]
-            self.display_image(image_path)
-            # Increment image index for next image
-            self.current_image_index += 1
-            # Set state to 'pause' for next call
-            self.state = 'pause'
-        elif self.state == 'pause':
-            # Display pause screen
-            if self.pause_image_path:
-                self.display_image(self.pause_image_path)
+        # Determine whether to display the pause image or EmoPics image
+        if current_image_index % 2 == 1:
+            # Display pause image every second image
+            if pause_image:
+                image_to_display = pause_image
             else:
-                # Display a blank screen if pause image is not available
-                self.image_label.clear()
-                self.image_label.setStyleSheet("background-color: black;")
-            # Set state to 'image' for next call
-            self.state = 'image'
+                image_to_display = None  # Handle gracefully if pause image isn't loaded
+        else:
+            # Display EmoPics image
+            image_index = current_image_index // 2
+            image_to_display = load_image(image_index)
 
-        # Wait for user to press space to proceed
-        self.waiting_for_space = True
+        if image_to_display:
+            image_rect = image_to_display.get_rect(center=(screen_width // 2, screen_height // 2))
+            screen.blit(image_to_display, image_rect)
+        else:
+            # If no image to display, optionally fill the screen with dark color
+            pass  # Already filled with dark background
 
-    def display_image(self, image_path):
-        # Clear any previous content
-        self.image_label.clear()
+        pygame.display.flip()
+    elif state == 'end':
+        screen.fill((18, 18, 18))
+        end_text = large_font.render("End of Experiment", True, (255, 255, 255))
+        end_rect = end_text.get_rect(center=(screen_width // 2, screen_height // 2))
+        screen.blit(end_text, end_rect)
+        pygame.display.flip()
 
-        # Load the image using OpenCV
-        image = cv2.imread(image_path)
-        if image is None:
-            # Handle case where image could not be loaded
-            print(f"Warning: Could not load image {image_path}")
-            return
-        # Convert color from BGR to RGB
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        # Convert to QImage
-        height, width, channel = image.shape
-        bytesPerLine = 3 * width
-        qImg = QImage(image.data, width, height, bytesPerLine, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qImg)
-        # Store the original pixmap
-        self.original_pixmap = pixmap
-        # Scale the pixmap to fit the label
-        label_size = self.image_label.size()
-        scaled_pixmap = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled_pixmap)
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
 
-    def display_end_screen(self):
-        # Clear any previous content
-        self.image_label.clear()
-        # Display end screen message
-        self.image_label.setText('End of Experiment')
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("font-size: 36px; color: #FFFFFF;")
+        if state == 'start':
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mouse_pos = event.pos
+                # Check dropdown interactions
+                for i in range(len(dropdowns)):
+                    handle_dropdown_click(i, mouse_pos)
 
-        # Wait for space bar or ESC to exit
-        self.waiting_for_exit = True
+                # Check for start button click
+                if start_button_rect.collidepoint(mouse_pos):
+                    if selected_diagnoses or any(dropdown['selection'] == 'NONE' for dropdown in dropdowns):
+                        state = 'experiment'
+                        current_image_index = 0  # Reset index at start
+                    else:
+                        print("Please select at least one diagnosis.")  # Placeholder message
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Space:
-            if hasattr(self, 'waiting_for_space') and self.waiting_for_space:
-                self.waiting_for_space = False
-                self.next_image()
-            elif hasattr(self, 'waiting_for_exit') and self.waiting_for_exit:
-                QApplication.quit()
-        elif event.key() == Qt.Key_Escape:
-            QApplication.quit()
+            elif event.type == pygame.KEYDOWN:
+                for dropdown in dropdowns:
+                    dropdown['open'] = False  # Close all dropdowns on any key press
 
-    def resizeEvent(self, event):
-        super(MainWindow, self).resizeEvent(event)
-        # When the window is resized, rescale the current image
-        if hasattr(self, 'image_label'):
-            if hasattr(self, 'original_pixmap') and not self.image_label.pixmap().isNull():
-                label_size = self.image_label.size()
-                scaled_pixmap = self.original_pixmap.scaled(
-                    label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.image_label.setPixmap(scaled_pixmap)
+        elif state == 'experiment':
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    # Advance to the next image or pause
+                    current_image_index += 1
+                    if current_image_index >= total_images * 2:
+                        state = 'end'
 
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    mainWin = MainWindow()
-    sys.exit(app.exec_())
+        elif state == 'end':
+            if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
+                running = False  # Exit on any key or mouse press
+
+pygame.quit()
