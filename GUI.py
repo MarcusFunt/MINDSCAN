@@ -1,5 +1,9 @@
 import pygame
 import os
+import time
+import json
+import random
+import string
 
 # Initialize Pygame
 pygame.init()
@@ -46,11 +50,11 @@ def load_image(index):
         img_path = os.path.join(image_folder, images[index])
         try:
             image = pygame.image.load(img_path).convert_alpha()
-            return scale_image_to_screen(image, screen_width, screen_height)
+            return scale_image_to_screen(image, screen_width, screen_height), os.path.basename(img_path)
         except pygame.error as e:
             print(f"Unable to load image {img_path}: {e}")
-            return None
-    return None
+            return None, ""
+    return None, ""
 
 # Load and scale pause image
 pause_image_path = "images/pause.png"  # Update this path as needed
@@ -104,13 +108,6 @@ def draw_start_menu():
     start_text_rect = start_text.get_rect(center=start_button_rect.center)
     screen.blit(start_text, start_text_rect)
 
-    # Display pause image in the upper right corner if loaded
-    # Display pause image in the upper right corner
-    # Adjust the position to avoid overlapping the start button
-    pause_image_rect = pause_image.get_rect(topright=(screen_width - 250, 50))  # Move it further left if necessary
-    screen.blit(pause_image, pause_image_rect)
-
-
     pygame.display.flip()
     return start_button_rect
 
@@ -145,6 +142,21 @@ def update_dropdowns(index):
         new_y = 100 + len(dropdowns) * 50
         dropdowns.append({'rect': pygame.Rect(50, new_y, 300, 40), 'open': False, 'selection': 'Select Diagnosis'})
 
+# Function to generate a random filename
+def generate_random_filename():
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=10)) + '.json'
+
+# Function to save data to a JSON file
+def save_data_to_json(image_name, diagnoses):
+    filename = generate_random_filename()
+    data = {
+        "headline": image_name,
+        "diagnoses": ','.join(diagnoses)
+    }
+    with open(filename, 'w') as file:
+        json.dump(data, file, indent=4)
+    print(f"Data saved to {filename}")
+
 # Main variables
 state = 'start'  # Can be 'start', 'experiment', or 'end'
 
@@ -156,26 +168,40 @@ while running:
     elif state == 'experiment':
         screen.fill((18, 18, 18))  # Dark background
 
-        # Determine whether to display the pause image or EmoPics image
-        if current_image_index % 2 == 1:
-            # Display pause image every second image
-            if pause_image:
-                image_to_display = pause_image
-            else:
-                image_to_display = None  # Handle gracefully if pause image isn't loaded
-        else:
-            # Display EmoPics image
-            image_index = current_image_index // 2
-            image_to_display = load_image(image_index)
-
-        if image_to_display:
+        # Display the pause image
+        if pause_image:
+            image_to_display = pause_image
             image_rect = image_to_display.get_rect(center=(screen_width // 2, screen_height // 2))
             screen.blit(image_to_display, image_rect)
-        else:
-            # If no image to display, optionally fill the screen with dark color
-            pass  # Already filled with dark background
+            pygame.display.flip()
 
-        pygame.display.flip()
+        waiting_for_space = True
+        while waiting_for_space:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                    waiting_for_space = False
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        waiting_for_space = False
+
+        # Display EmoPics image
+        if running:
+            image_to_display, image_name = load_image(current_image_index)
+            if image_to_display:
+                screen.fill((18, 18, 18))
+                image_rect = image_to_display.get_rect(center=(screen_width // 2, screen_height // 2))
+                screen.blit(image_to_display, image_rect)
+                pygame.display.flip()
+                pygame.time.wait(4000)  # Wait for 4 seconds
+
+                # Save the data to a JSON file
+                save_data_to_json(image_name, selected_diagnoses)
+
+            # Cycle to the next image after pause
+            current_image_index = (current_image_index + 1) % total_images
+
     elif state == 'end':
         screen.fill((18, 18, 18))
         end_text = large_font.render("End of Experiment", True, (255, 255, 255))
@@ -205,14 +231,6 @@ while running:
             elif event.type == pygame.KEYDOWN:
                 for dropdown in dropdowns:
                     dropdown['open'] = False  # Close all dropdowns on any key press
-
-        elif state == 'experiment':
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
-                    # Advance to the next image or pause
-                    current_image_index += 1
-                    if current_image_index >= total_images * 2:
-                        state = 'end'
 
         elif state == 'end':
             if event.type == pygame.KEYDOWN or event.type == pygame.MOUSEBUTTONDOWN:
