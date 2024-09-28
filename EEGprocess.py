@@ -1,258 +1,300 @@
-import serial
-import numpy as np
-import pygame
-import threading
-import time
-from collections import deque
+"""
+Python Script: Real-Time EEG Data Processing with Enhanced Filtering and FFT Visualization
+
+Description:
+- Connects to the Arduino via COM12 at 115200 baud.
+- Reads incoming analog EEG values with a timestamp.
+- Applies advanced filtering:
+    - Band-Pass Filter: 0.5-50 Hz
+    - Notch Filter: 50 Hz and its harmonics (100Hz)
+- Performs Fast Fourier Transform (FFT) for frequency analysis.
+- Visualizes the FFT data in real-time using PyQtGraph, highlighting relevant EEG bands.
+
+Requirements:
+- pyserial (`pip install pyserial`)
+- pyqtgraph (`pip install pyqtgraph`)
+- numpy (`pip install numpy`)
+- scipy (`pip install scipy`)
+- PyQt5 (`pip install PyQt5`)
+"""
+
 import sys
-from scipy.signal import welch
-from scipy.interpolate import interp1d
+import serial
+import time
+import numpy as np
+from collections import deque
+from PyQt5 import QtWidgets
+from PyQt5.QtCore import Qt  # Import Qt for splitter orientation
+import pyqtgraph as pg
+import threading
+from scipy.signal import butter, lfilter, iirnotch, welch
 
-# Configuration Parameters
-PORT = 'COM7'               # Serial port to read from
-BAUD_RATE = 115200          # Baud rate, matching the Arduino code
-SAMPLING_RATE = 1000        # Sampling rate in Hz (adjust if different)
-BUFFER_SIZE = 4096          # Number of samples to keep in buffer
-PROCESSING_INTERVAL = 0.1   # Interval to process and update plot (seconds) => 10 Hz
+# ----------------------------- Configuration ----------------------------- #
 
-# Filter Parameters
-LOWCUT = 1.0                # Low cutoff frequency (Hz) for bandpass filter
-HIGHCUT = 50.0              # High cutoff frequency (Hz) for bandpass filter
-NOTCH_FREQ = 50.0           # Frequency to notch filter (e.g., 50 Hz for Europe, 60 Hz for USA)
-NOTCH_Q = 30.0              # Quality factor for notch filter
-FILTER_ORDER = 5            # Order of the Butterworth filter
+SERIAL_PORT = 'COM12'      # Replace with your Arduino's COM port (e.g., 'COM12' on Windows or '/dev/ttyUSB0' on Linux)
+BAUD_RATE = 115200        # Must match the Arduino's baud rate
+TIMEOUT = 1               # Read timeout in seconds
+BUFFER_SIZE = 1024        # Number of samples to buffer (power of 2 for FFT)
+CHANNEL_NAME = 'EEG1'     # Name of the EEG channel
+SFREQ = 1000              # Sampling frequency in Hz (Arduino sample rate)
+ADC_MAX = 4095            # Maximum ADC value (4095 for 12-bit ADC)
+V_REF = 5.0               # Reference voltage in volts
+BIAS = 2.5                # Bias voltage in volts (Vcc/2 for centering)
 
-# Artifact Detection Parameters
-ARTIFACT_THRESHOLD = 3000   # Amplitude threshold for artifact detection (adjust based on data)
+# Notch filter frequencies (power line noise and its first harmonic)
+NOTCH_FREQS = [50.0, 100.0]  # Add more harmonics if needed
 
-# Visualization Parameters
-WINDOW_WIDTH = 1200         # Window width in pixels
-WINDOW_HEIGHT = 800         # Window height in pixels
-FPS = 60                    # Pygame frames per second
+# EEG Bands (in Hz)
+EEG_BANDS = {
+    'Delta': (0.5, 4),
+    'Theta': (4, 8),
+    'Alpha': (8, 12),
+    'Beta': (12, 30),
+    # 'Gamma': (30, 50)  # Uncomment if needed
+}
 
-# Initialize a thread-safe deque for buffering incoming data
-data_buffer = deque(maxlen=BUFFER_SIZE)
+# ---------------------------- Data Structures ---------------------------- #
 
-# Flag to control the reading thread
-keep_reading = True
+eeg_buffer = deque(maxlen=BUFFER_SIZE)      # Buffer to store EEG values
+timestamps = deque(maxlen=BUFFER_SIZE)      # Buffer to store timestamps
 
-def read_serial_data(ser):
+# ------------------------------ Serial Reader ----------------------------- #
+
+def read_serial_data():
     """
-    Continuously read data from the serial port and append to the buffer.
+    Reads serial data from the Arduino and appends it to the buffers.
+    Expected data format: <timestamp>,<value>
     """
-    global keep_reading
-    while keep_reading:
-        try:
-            line = ser.readline().decode('utf-8').strip()
-            if line:
-                value = int(line)
-                data_buffer.append(value)
-        except ValueError:
-            continue  # Ignore lines that can't be converted to integer
-        except serial.SerialException:
-            print("Serial connection lost.")
-            keep_reading = False
-            break
+    global eeg_buffer, timestamps
+    try:
+        with serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=TIMEOUT) as ser:
+            print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+            time.sleep(2)  # Wait for the serial connection to initialize
 
-def initialize_pygame():
+            while True:
+                if ser.in_waiting:
+                    line = ser.readline().decode('utf-8').strip()
+                    if line:
+                        try:
+                            parts = line.split(',')
+                            if len(parts) != 2:
+                                print(f"Malformed line: {line}")
+                                continue
+                            timestamp_ms = int(parts[0])
+                            analog_value = int(parts[1])
+                            timestamps.append(timestamp_ms)
+                            eeg_buffer.append(analog_value)
+                            # Debugging: Print the received value
+                            print(f"Received Value: {analog_value}")  # Add this print statement
+                        except ValueError as e:
+                            print(f"ValueError: {e} | Line: {line}")
+    except serial.SerialException as e:
+        print(f"SerialException: {e}")
+    except KeyboardInterrupt:
+        print("\nSerial reading stopped.")
+
+# ------------------------------ Filtering Functions ------------------------ #
+
+def butter_bandpass(lowcut, highcut, fs, order=4):
     """
-    Initialize pygame and set up the window.
+    Designs a Butterworth band-pass filter.
+
+    Parameters:
+    - lowcut: Low cutoff frequency in Hz
+    - highcut: High cutoff frequency in Hz
+    - fs: Sampling frequency in Hz
+    - order: Filter order
+
+    Returns:
+    - b, a: Numerator and denominator coefficients of the filter
     """
-    pygame.init()
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("Live FFT of Filtered EEG Data")
-    return screen
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
 
-def detect_artifacts(data, threshold):
+def butter_notch(freq, fs, Q=30):
     """
-    Detect artifacts in the data based on amplitude threshold.
-    Returns a boolean array where True indicates artifact.
+    Designs a Butterworth notch filter.
+
+    Parameters:
+    - freq: Frequency to notch out in Hz
+    - fs: Sampling frequency in Hz
+    - Q: Quality factor
+
+    Returns:
+    - b, a: Numerator and denominator coefficients of the filter
     """
-    return np.abs(data) > threshold
+    nyq = 0.5 * fs
+    w0 = freq / nyq
+    b, a = iirnotch(w0, Q)
+    return b, a
 
-def interpolate_artifacts(data, artifact_indices):
+def apply_filters(data, fs):
     """
-    Interpolate over artifact indices to mitigate artifacts.
+    Applies band-pass and notch filters to the EEG data.
+
+    Parameters:
+    - data: Numpy array of EEG voltages
+    - fs: Sampling frequency in Hz
+
+    Returns:
+    - filtered_data: Numpy array of filtered EEG voltages
     """
-    clean_data = data.copy()
-    if np.any(artifact_indices):
-        x = np.arange(len(data))
-        valid = ~artifact_indices
-        if np.sum(valid) < 2:
-            # Not enough points to interpolate
-            clean_data[artifact_indices] = 0
-            return clean_data
-        f = interp1d(x[valid], data[valid], kind='linear', fill_value="extrapolate")
-        clean_data[artifact_indices] = f(x[artifact_indices])
-    return clean_data
+    # Band-Pass Filter: 0.5-50 Hz
+    b_bp, a_bp = butter_bandpass(0.5, 50.0, fs, order=4)
+    filtered_data = lfilter(b_bp, a_bp, data)
 
-def draw_fft(screen, freqs, psd_values):
+    # Apply Notch Filters for each frequency in NOTCH_FREQS
+    for freq in NOTCH_FREQS:
+        b_notch, a_notch = butter_notch(freq, fs, Q=30)
+        filtered_data = lfilter(b_notch, a_notch, filtered_data)
+
+    return filtered_data
+
+# ------------------------------ FFT Processing ---------------------------- #
+
+def compute_fft(filtered_data):
     """
-    Draw the FFT (PSD) results on the pygame screen.
+    Computes the Fast Fourier Transform (FFT) of the filtered EEG data.
+
+    Parameters:
+    - filtered_data: numpy array of filtered EEG voltages
+
+    Returns:
+    - freqs: frequency bins
+    - fft_magnitude: magnitude of the FFT
     """
-    screen.fill((0, 0, 0))  # Clear screen with black
+    N = len(filtered_data)
+    fft_vals = np.fft.fft(filtered_data * np.hanning(N))  # Apply Hanning window to reduce spectral leakage
+    fft_magnitude = np.abs(fft_vals) / N  # Normalize
+    freqs = np.fft.fftfreq(N, d=1/SFREQ)
 
-    # Define plot area margins
-    left_margin = 100
-    right_margin = 50
-    top_margin = 50
-    bottom_margin = 100
+    # Consider only the positive frequencies
+    pos_mask = freqs >= 0
+    freqs = freqs[pos_mask]
+    fft_magnitude = fft_magnitude[pos_mask]
 
-    plot_width = WINDOW_WIDTH - left_margin - right_margin
-    plot_height = WINDOW_HEIGHT - top_margin - bottom_margin
+    return freqs, fft_magnitude
 
-    # Draw axes
-    axis_color = (255, 255, 255)  # White
-    pygame.draw.line(screen, axis_color, 
-                     (left_margin, top_margin), 
-                     (left_margin, top_margin + plot_height), 2)  # Y-axis
-    pygame.draw.line(screen, axis_color, 
-                     (left_margin, top_margin + plot_height), 
-                     (left_margin + plot_width, top_margin + plot_height), 2)  # X-axis
+# ------------------------------ Real-Time Plotting ------------------------- #
 
-    # Normalize PSD values for plotting
-    max_power = np.max(psd_values)
-    if max_power == 0:
-        max_power = 1  # Prevent division by zero
-    normalized_power = psd_values / max_power
+class EEGPlotter(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
 
-    # Define frequency range to display (e.g., 0-60 Hz)
-    display_freq_max = 60
-    indices = np.where(freqs <= display_freq_max)
-    freqs_display = freqs[indices]
-    power_display = normalized_power[indices]
+    def init_ui(self):
+        self.setWindowTitle('Real-Time EEG FFT')
+        self.setGeometry(100, 100, 800, 600)
 
-    # Plot the PSD as a line graph
-    num_points = len(freqs_display)
-    if num_points < 2:
-        return  # Not enough points to plot
+        # Create a central widget and layout
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.layout = QtWidgets.QVBoxLayout(self.central_widget)
 
-    points = []
-    for i in range(num_points):
-        x = left_margin + (freqs_display[i] / display_freq_max) * plot_width
-        y = top_margin + plot_height - (power_display[i] * plot_height)
-        points.append((x, y))
+        # Initialize PyQtGraph PlotWidget for Frequency-Domain FFT
+        self.freq_plot_widget = pg.PlotWidget(title="Frequency-Domain FFT")
+        self.freq_plot_widget.setLabel('left', 'Magnitude', units='')
+        self.freq_plot_widget.setLabel('bottom', 'Frequency', units='Hz')
+        self.freq_plot_widget.showGrid(x=True, y=True)
+        self.layout.addWidget(self.freq_plot_widget)
 
-    if len(points) > 1:
-        pygame.draw.lines(screen, (0, 255, 0), False, points, 2)  # Green line
+        # Initialize the FFT plot curve
+        self.freq_curve = self.freq_plot_widget.plot(pen=pg.mkPen(color='m', width=2))
 
-    # Add frequency labels (every 10 Hz)
-    font = pygame.font.SysFont(None, 24)
-    for freq in range(0, int(display_freq_max)+1, 10):
-        x = left_margin + (freq / display_freq_max) * plot_width
-        y = top_margin + plot_height
-        pygame.draw.line(screen, axis_color, (x, y), (x, y + 10), 2)
-        label = font.render(f"{freq} Hz", True, axis_color)
-        screen.blit(label, (x - 20, y + 15))
+        # Highlight EEG Bands
+        self.highlight_eeg_bands()
 
-    # Add power labels (optional, normalized)
-    for i in range(1, 6):
-        power_level = i * 0.2
-        y = top_margin + plot_height - (power_level * plot_height)
-        pygame.draw.line(screen, axis_color, 
-                         (left_margin - 10, y), 
-                         (left_margin, y), 2)
-        label = font.render(f"{power_level:.1f}", True, axis_color)
-        screen.blit(label, (left_margin - 60, y - 10))
+        # Timer for updating the FFT plot
+        self.timer = pg.QtCore.QTimer()
+        self.timer.timeout.connect(self.update_fft_plot)
+        self.timer.start(100)  # Update every 100 ms
 
-    # Add titles
-    title_font = pygame.font.SysFont(None, 32)
-    title = title_font.render("Live FFT of Filtered EEG Data", True, (255, 255, 255))
-    screen.blit(title, (WINDOW_WIDTH // 2 - title.get_width() // 2, 10))
+    def highlight_eeg_bands(self):
+        """
+        Highlights EEG bands on the FFT plot for visual reference.
+        """
+        for band, (low, high) in EEG_BANDS.items():
+            brush = pg.mkBrush(color=(np.random.randint(0,255), np.random.randint(0,255), np.random.randint(0,255), 50))
+            rect = pg.QtWidgets.QGraphicsRectItem(low, 0, high - low, 1e-3)
+            rect.setBrush(brush)
+            rect.setPen(pg.mkPen(None))
+            self.freq_plot_widget.addItem(rect)
+            # Add band label
+            text = pg.TextItem(text=band, color=brush.color().getRgb())
+            text.setPos(low + (high - low)/2, 1e-3)
+            self.freq_plot_widget.addItem(text)
 
-    # Add axis labels
-    axis_label_font = pygame.font.SysFont(None, 24)
-    xlabel = axis_label_font.render("Frequency (Hz)", True, (255, 255, 255))
-    ylabel = axis_label_font.render("Power Spectral Density (Normalized)", True, (255, 255, 255))
-    screen.blit(xlabel, (left_margin + plot_width // 2 - xlabel.get_width() // 2, top_margin + plot_height + 40))
-    
-    # Rotate ylabel for better readability
-    ylabel_rotated = pygame.transform.rotate(ylabel, 90)
-    screen.blit(ylabel_rotated, (left_margin - 80, top_margin + plot_height // 2 - ylabel_rotated.get_height() // 2))
+    def update_fft_plot(self):
+        if len(eeg_buffer) < BUFFER_SIZE:
+            # Not enough data to compute FFT
+            return
 
-    # Update the display
-    pygame.display.flip()
+        # Convert deque to numpy array
+        eeg_data = np.array(eeg_buffer)
+
+        # Convert ADC values to voltage and center
+        voltage = process_eeg_data(eeg_data, adc_max=ADC_MAX, v_ref=V_REF, bias=BIAS)
+
+        # Apply filters
+        filtered_voltage = apply_filters(voltage, SFREQ)
+
+        # Compute FFT
+        freqs, fft_magnitude = compute_fft(filtered_voltage)
+
+        # Debugging: Ensure FFT data is valid
+        if len(freqs) == 0 or len(fft_magnitude) == 0:
+            print("FFT computation returned empty data.")
+            return
+
+        # Update the FFT plot
+        self.freq_curve.setData(freqs, fft_magnitude)
+
+        # Optional: Print FFT peak information for debugging
+        peak_idx = np.argmax(fft_magnitude)
+        peak_freq = freqs[peak_idx]
+        peak_mag = fft_magnitude[peak_idx]
+        print(f"FFT Peak: {peak_mag:.4f} at {peak_freq} Hz")
+
+# ------------------------------- Main Function ---------------------------- #
 
 def main():
-    global keep_reading
+    # Start serial reading in a separate thread
+    serial_thread = threading.Thread(target=read_serial_data, daemon=True)
+    serial_thread.start()
 
-    # Set up the serial connection
-    try:
-        ser = serial.Serial(PORT, BAUD_RATE, timeout=1)
-        print(f"Connected to {PORT} at {BAUD_RATE} baud.")
-    except serial.SerialException as e:
-        print(f"Error opening serial port {PORT}: {e}")
-        sys.exit(1)
+    # Start the Qt application for plotting
+    app = QtWidgets.QApplication(sys.argv)
+    eeg_plotter = EEGPlotter()
+    eeg_plotter.show()
+    sys.exit(app.exec_())
 
-    # Start the serial reading thread
-    read_thread = threading.Thread(target=read_serial_data, args=(ser,))
-    read_thread.start()
+# ----------------------------- Helper Functions ---------------------------- #
 
-    # Initialize pygame
-    screen = initialize_pygame()
-    clock = pygame.time.Clock()
+def process_eeg_data(eeg_values, adc_max=ADC_MAX, v_ref=V_REF, bias=BIAS):
+    """
+    Processes raw EEG values:
+    - Converts ADC values to voltage.
+    - Centers the signal around 0V.
 
-    # Variables for processing intervals
-    last_processing_time = time.time()
+    Parameters:
+    - eeg_values: iterable of raw ADC values
+    - adc_max: maximum ADC value (4095 for 12-bit, 1023 for 10-bit)
+    - v_ref: reference voltage (Vcc)
+    - bias: bias voltage (Vcc/2)
 
-    try:
-        while keep_reading:
-            # Handle pygame events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    keep_reading = False
+    Returns:
+    - voltage_centered: numpy array of processed EEG voltages
+    """
+    # Convert ADC (0-4095) to Voltage (assuming v_ref)
+    voltage = (eeg_values / adc_max) * v_ref
+    # Center the signal around 0V (assuming bias = Vcc/2)
+    voltage_centered = voltage - bias
+    return voltage_centered
 
-            current_time = time.time()
-            if current_time - last_processing_time >= PROCESSING_INTERVAL:
-                if len(data_buffer) >= BUFFER_SIZE:
-                    # Convert buffer to numpy array
-                    data_array = np.array(data_buffer)
+# ------------------------------- Entry Point ------------------------------ #
 
-                    # Artifact Detection
-                    artifacts = detect_artifacts(data_array, ARTIFACT_THRESHOLD)
-                    if np.any(artifacts):
-                        data_array = interpolate_artifacts(data_array, artifacts)
-                        print("Artifacts detected and interpolated.")
-
-                    # Apply bandpass filter using SciPy (if not using MNE)
-                    from scipy.signal import butter, filtfilt
-
-                    # Design bandpass filter
-                    nyquist = 0.5 * SAMPLING_RATE
-                    low = LOWCUT / nyquist
-                    high = HIGHCUT / nyquist
-                    b, a = butter(FILTER_ORDER, [low, high], btype='band')
-
-                    # Apply bandpass filter
-                    data_filtered = filtfilt(b, a, data_array)
-
-                    # Apply notch filter
-                    notch_freq = NOTCH_FREQ / nyquist
-                    notch_quality = NOTCH_Q
-                    from scipy.signal import iirnotch
-
-                    b_notch, a_notch = iirnotch(notch_freq, notch_quality)
-                    data_filtered = filtfilt(b_notch, a_notch, data_filtered)
-
-                    # Compute Power Spectral Density (PSD) using Welch's method
-                    freqs, psd_values = welch(data_filtered, fs=SAMPLING_RATE, nperseg=1024, noverlap=512)
-
-                    # Draw the FFT on the screen
-                    draw_fft(screen, freqs, psd_values)
-
-                last_processing_time = current_time
-
-            clock.tick(FPS)
-
-    except KeyboardInterrupt:
-        print("Interrupted by user.")
-    finally:
-        # Clean up
-        keep_reading = False
-        read_thread.join()
-        ser.close()
-        pygame.quit()
-        print("Serial connection closed and pygame quit.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
