@@ -1,33 +1,35 @@
-#include <Arduino.h>
+// Constants
+const int analogPin = D2; // GPIO4 on the XIAO board
+const unsigned long samplingInterval = 500; // in microseconds (500 µs for 2 kSPS)
 
-const double samplingFrequency = 5000.0;  // Set desired sample rate in Hz
-unsigned long samplingInterval;           // Time interval between samples in microseconds
-unsigned long nextSampleTime;
+// Variables
+unsigned long previousMicros = 0;
 
 void setup() {
-  Serial.begin(1000000);                  // Set baud rate for serial communication
-  samplingInterval = 1000000 / samplingFrequency;  // Calculate sampling interval in microseconds
-  nextSampleTime = micros();              // Initialize the next sample time
+  // Initialize serial communication at 115200 baud
+  Serial.begin(115200);
+  
+  // Initialize the analog pin
+  pinMode(analogPin, INPUT);
+  
+  // Optional: Wait for serial port to connect (useful for some boards)
+  while (!Serial) {
+    ; // Wait for serial port to connect
+  }
 }
 
 void loop() {
-  unsigned long currentTime = micros();
+  unsigned long currentMicros = micros();
   
-  // Take sample only when appropriate time has passed
-  if (currentTime >= nextSampleTime) {
-    // Read analog value (0-1023 for 10-bit ADC)
-    uint16_t value = analogRead(4);
-
-    // Send as two bytes (little endian)
-    Serial.write(value & 0xFF);        // Low byte
-    Serial.write((value >> 8) & 0xFF); // High byte
-
-    // Schedule next sample
-    nextSampleTime += samplingInterval;
-
-    // Handle timing drift
-    if (currentTime > nextSampleTime) {
-      nextSampleTime = currentTime + samplingInterval;
-    }
+  // Check if it's time to sample
+  if (currentMicros - previousMicros >= samplingInterval) {
+    previousMicros += samplingInterval;
+    
+    // Read the analog value
+    int analogValue = analogRead(analogPin);
+    
+    // Send the analog value as two bytes (Little Endian)
+    Serial.write(analogValue & 0xFF);         // Lower byte
+    Serial.write((analogValue >> 8) & 0xFF);  // Higher byte
   }
 }

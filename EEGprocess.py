@@ -1,252 +1,241 @@
 import serial
 import pygame
-import numpy as np
-from scipy import signal
-import threading
-from collections import deque
 import sys
 import struct
+import threading
+import time
+import numpy as np
+from scipy.signal import iirnotch, filtfilt
 
-# ====================== Configuration Parameters ======================
+# Configuration Parameters
+SERIAL_PORT = 'COM7'  # Replace with your serial port
+BAUD_RATE = 115200
+SAMPLE_RATE = 2000  # 2 kSPS as per Arduino code
+BUFFER_SIZE = 800    # Number of samples to display (matches window width)
+WINDOW_WIDTH = 1200  # Increased width to accommodate FFT display and indicators
+WINDOW_HEIGHT = 600
+BACKGROUND_COLOR = (0, 0, 0)
+FILTERED_LINE_COLOR = (0, 255, 0)  # Green for filtered signal
+FFT_COLOR = (255, 255, 255)        # White for FFT
 
-SERIAL_PORT = 'COM12'  # Replace with your Arduino's serial port
-BAUD_RATE = 1000000  # Baud rate must match Arduino
-SAMPLING_FREQ = 5000.0  # Hz, must match Arduino
-BUFFER_SIZE = 5000  # Number of samples to display (1 second of data)
-DISPLAY_WIDTH = 1200
-DISPLAY_HEIGHT = 800
+# ADC Parameters
+ADC_MAX = 4095       # 12-bit ADC
+VOLTAGE_RANGE = 3.3  # Typical voltage range for Arduino ADC
 
-# EEG frequency bands adjusted to 0.5-35 Hz
-FREQ_BANDS = {
+# Scaling Parameters
+VERTICAL_SCALE = 0.8  # Adjust this to change vertical scaling
+MIDPOINT = WINDOW_HEIGHT // 2
+
+# FFT Parameters
+FFT_SIZE = BUFFER_SIZE
+FREQ_DISPLAY_HEIGHT = WINDOW_HEIGHT // 2  # Height allocated for FFT display
+MAX_FFT_FREQ = 70  # Maximum frequency to display in FFT
+
+# Notch Filter Parameters
+NOTCH_FREQ = 50.0  # Frequency to be removed from signal (Hz)
+Q_FACTOR = 30.0     # Quality factor for the notch filter
+
+# EEG Bands
+EEG_BANDS = {
     'Delta': (0.5, 4),
     'Theta': (4, 8),
     'Alpha': (8, 13),
-    'Beta': (13, 30)
+    'Beta': (13, 30),
+    'Gamma': (30, 70)
 }
 
-# ====================== Filter Design ======================
+# Initialize Pygame
+pygame.init()
+screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+pygame.display.set_caption("EEG Oscilloscope with FFT and 50Hz Filter")
+clock = pygame.time.Clock()
 
-def butter_bandpass(lowcut, highcut, fs, order=5):
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = signal.butter(order, [low, high], btype='band')
-    return b, a
+# Data Buffers
+data_buffer = []
+filtered_buffer = []
 
-def butter_notch(center_freq, bandwidth, fs, order=2):
-    nyq = 0.5 * fs
-    b, a = signal.iirnotch(center_freq / nyq, Q=center_freq / bandwidth)
-    return b, a
+# Thread-safe flag to stop the reading thread
+stop_thread = False
 
-def apply_filter(data, b, a):
-    return signal.lfilter(b, a, data)
-
-# ====================== EEG Data Handler ======================
-
-class EEGDataHandler:
-    def __init__(self, port, baud, fs, buffer_size):
+def read_serial_data(serial_conn):
+    global data_buffer, stop_thread
+    while not stop_thread:
         try:
-            self.serial_port = serial.Serial(port, baud, timeout=1)
-            print(f"Connected to {port} at {baud} baud.")
+            if serial_conn.in_waiting >= 2:
+                data = serial_conn.read(2)
+                if len(data) == 2:
+                    analog_value = struct.unpack('<H', data)[0]
+                    analog_value = max(0, min(analog_value, ADC_MAX))
+                    data_buffer.append(analog_value)
+                    if len(data_buffer) > BUFFER_SIZE:
+                        data_buffer.pop(0)
         except serial.SerialException as e:
-            print(f"Failed to connect to serial port {port}: {e}")
-            sys.exit(1)
-        
-        self.fs = fs
-        self.buffer_size = buffer_size
-        self.data_buffer = deque(maxlen=buffer_size)
-        self.lock = threading.Lock()
-        self.running = True
+            print(f"Serial exception: {e}")
+            stop_thread = True
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            stop_thread = True
 
-        # Design bandpass filter for EEG (0.5-35 Hz)
-        self.b_bandpass, self.a_bandpass = butter_bandpass(0.5, 35.0, fs, order=4)
-        
-        # Design notch filter for 50Hz (common power line noise)
-        self.b_notch, self.a_notch = butter_notch(50.0, 2.0, fs, order=2)
+def map_value(value, in_min, in_max, out_min, out_max):
+    return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
-        # Start the data reading thread
-        self.thread = threading.Thread(target=self.read_serial, daemon=True)
-        self.thread.start()
+def apply_notch_filter(data, fs, freq, Q):
+    # Design notch filter
+    b, a = iirnotch(freq, Q, fs)
+    # Apply filter
+    filtered_data = filtfilt(b, a, data)
+    return filtered_data
 
-    def read_serial(self):
-        while self.running:
-            try:
-                # Read two bytes for each sample
-                bytes_to_read = 2
-                data = self.serial_port.read(bytes_to_read)
-                if len(data) == bytes_to_read:
-                    # Unpack little endian unsigned short (uint16_t)
-                    value = struct.unpack('<H', data)[0]
-                    with self.lock:
-                        self.data_buffer.append(value)
-            except struct.error:
-                print(f"Incomplete data received.")
-            except Exception as e:
-                print(f"Error reading serial data: {e}")
-                self.running = False
+def calculate_eeg_band_powers(freqs, fft_magnitude, bands):
+    band_powers = {}
+    for band, (low, high) in bands.items():
+        # Find indices corresponding to the band
+        idx = np.where((freqs >= low) & (freqs < high))[0]
+        # Calculate the average power in the band
+        power = np.mean(fft_magnitude[idx]) if len(idx) > 0 else 0
+        band_powers[band] = power
+    return band_powers
 
-    def get_filtered_data(self):
-        with self.lock:
-            data = list(self.data_buffer)
-        
-        if len(data) < self.buffer_size:
-            # Pad with zeros if buffer is not full yet
-            data = [0] * (self.buffer_size - len(data)) + data
-        
-        # Convert to numpy array for filtering
-        data_np = np.array(data, dtype=np.float32)
+def draw_eeg_band_indicators(band_powers, font):
+    x_start = BUFFER_SIZE + 20
+    y_start = 20
+    padding = 10
+    bar_width = 20
+    max_bar_height = 150  # Increased max height for better visibility
 
-        # Normalize ADC values (0-1023) to voltage (assuming 5V reference)
-        data_np = (data_np / 1023.0) * 5.0
-
-        # Apply bandpass filter
-        filtered = apply_filter(data_np, self.b_bandpass, self.a_bandpass)
-        
-        # Apply notch filter
-        filtered = apply_filter(filtered, self.b_notch, self.a_notch)
-        
-        return filtered
-
-    def close(self):
-        self.running = False
-        self.thread.join()
-        self.serial_port.close()
-        print("Serial port closed.")
-
-# ====================== Visualization ======================
-
-class EEGVisualizer:
-    def __init__(self, data_handler, width=DISPLAY_WIDTH, height=DISPLAY_HEIGHT):
-        pygame.init()
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("Real-Time EEG Visualization")
-        self.clock = pygame.time.Clock()
-        self.data_handler = data_handler
-        self.width = width
-        self.height = height
-        self.font = pygame.font.Font(None, 24)
-        
-        # Define subplot areas
-        self.waveform_height = int(self.height * 0.5)
-        self.fft_height = int(self.height * 0.35)
-        self.bands_height = int(self.height * 0.15)
-    
-    def draw_eeg_waveform(self, data):
-        scaling_factor = self.waveform_height / 2 / 1.0  # Assuming EEG signals are in ±1 mV range
-        normalized_data = data * scaling_factor
-
-        points = [
-            (int(i * self.width / len(data)), int(self.waveform_height / 2 - d))
-            for i, d in enumerate(normalized_data)
-        ]
-        pygame.draw.lines(self.screen, (0, 255, 0), False, points, 2)
-        
-        # Label
-        label = self.font.render("EEG Waveform (0.5-35 Hz)", True, (255, 255, 255))
-        self.screen.blit(label, (10, 10))
-    
-    def draw_fft(self, data):
-        fft_data = np.fft.fft(data)
-        fft_freq = np.fft.fftfreq(len(data), 1/self.data_handler.fs)
-        
-        # Only positive frequencies
-        pos_mask = fft_freq > 0
-        freqs = fft_freq[pos_mask]
-        magnitude = np.abs(fft_data[pos_mask])
-
-        # Limit to 0.5-35 Hz for FFT visualization
-        freq_mask = (freqs >= 0.5) & (freqs <= 35)
-        freqs = freqs[freq_mask]
-        magnitude = magnitude[freq_mask]
-        
-        # Normalize magnitude for visualization
-        magnitude = magnitude / np.max(magnitude) * self.fft_height if np.max(magnitude) != 0 else magnitude
-
-        # Scale frequency to fit the display width
-        scaled_freqs = (freqs / 35.0) * self.width
-        points = [
-            (int(f), self.waveform_height + self.fft_height - int(m))
-            for f, m in zip(scaled_freqs, magnitude)
-        ]
-        pygame.draw.lines(self.screen, (255, 165, 0), False, points, 1)
-        
-        # Label
-        label = self.font.render("FFT (0.5-35 Hz)", True, (255, 255, 255))
-        self.screen.blit(label, (10, self.waveform_height + 10))
-    
-    def draw_band_powers(self, data):
-        f, Pxx = signal.welch(data, fs=self.data_handler.fs, nperseg=256)
-        total_power = np.sum(Pxx)
-        if total_power == 0:
-            total_power = 1  # Prevent division by zero
-        
-        bar_width = self.width / len(FREQ_BANDS)
-        
-        for i, (band, (low, high)) in enumerate(FREQ_BANDS.items()):
-            mask = (f >= low) & (f < high)
-            band_power = np.sum(Pxx[mask]) / total_power
-            bar_height = int(band_power * self.bands_height)
-            color = self.get_band_color(band)
-            
-            pygame.draw.rect(
-                self.screen,
-                color,
-                (
-                    i * bar_width + 5,  # Add padding from left
-                    self.waveform_height + self.fft_height + self.bands_height - bar_height,
-                    bar_width - 10,  # Reduce width for spacing
-                    bar_height
-                )
-            )
-            
-            # Display band name and power
-            text = self.font.render(f"{band}: {band_power:.2f}", True, (255, 255, 255))
-            self.screen.blit(text, (i * bar_width + 10, self.waveform_height + self.fft_height + 5))
-    
-    def get_band_color(self, band):
-        colors = {
-            'Delta': (255, 0, 0),    # Red
-            'Theta': (255, 165, 0),  # Orange
-            'Alpha': (255, 255, 0),  # Yellow
-            'Beta': (0, 255, 0)      # Green
-        }
-        return colors.get(band, (255, 255, 255))  # Default to white
-    
-    def run(self):
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-            
-            # Get filtered data
-            data = self.data_handler.get_filtered_data()
-            
-            # Draw components
-            self.screen.fill((0, 0, 0))  # Clear screen with black
-            self.draw_eeg_waveform(data)
-            self.draw_fft(data)
-            self.draw_band_powers(data)
-            
-            pygame.display.flip()
-            self.clock.tick(30)  # Limit to 30 FPS
-        
-        pygame.quit()
-
-# ====================== Main Execution ======================
+    # Normalize powers for visualization
+    max_power = max(band_powers.values()) if band_powers else 1
+    for i, (band, power) in enumerate(band_powers.items()):
+        # Calculate bar height
+        bar_height = int((power / max_power) * max_bar_height) if max_power != 0 else 0
+        # Define bar position
+        x = x_start + i * (bar_width + padding)
+        y = y_start + (max_bar_height - bar_height)
+        # Define bar color based on EEG band
+        if band == 'Delta':
+            color = (0, 0, 255)       # Blue
+        elif band == 'Theta':
+            color = (0, 255, 255)     # Cyan
+        elif band == 'Alpha':
+            color = (0, 255, 0)       # Green
+        elif band == 'Beta':
+            color = (255, 255, 0)     # Yellow
+        elif band == 'Gamma':
+            color = (255, 0, 0)       # Red
+        else:
+            color = (255, 255, 255)   # White for undefined bands
+        # Draw the bar
+        pygame.draw.rect(screen, color, (x, y, bar_width, bar_height))
+        # Render the band label
+        label = font.render(band, True, (255, 255, 255))
+        screen.blit(label, (x - 5, y + bar_height + 5))
+        # Render the power value
+        power_label = font.render(f"{power:.2f}", True, (255, 255, 255))
+        screen.blit(power_label, (x - 5, y + bar_height + 25))
 
 def main():
+    global stop_thread
     try:
-        eeg_handler = EEGDataHandler(SERIAL_PORT, BAUD_RATE, SAMPLING_FREQ, BUFFER_SIZE)
-        visualizer = EEGVisualizer(eeg_handler)
-        visualizer.run()
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        print(f"Connected to {SERIAL_PORT} at {BAUD_RATE} baud.")
+    except serial.SerialException as e:
+        print(f"Could not open serial port {SERIAL_PORT}: {e}")
+        sys.exit(1)
+
+    thread = threading.Thread(target=read_serial_data, args=(ser,))
+    thread.start()
+
+    # Prepare notch filter
+    fs = SAMPLE_RATE  # Sampling frequency
+    freq = NOTCH_FREQ
+    Q = Q_FACTOR
+
+    # Initialize font for EEG indicators
+    pygame.font.init()
+    font = pygame.font.SysFont(None, 20)
+
+    try:
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    stop_thread = True
+                    thread.join()
+                    ser.close()
+                    pygame.quit()
+                    sys.exit()
+
+            screen.fill(BACKGROUND_COLOR)
+
+            if len(data_buffer) == BUFFER_SIZE:
+                # Convert ADC values to voltage
+                voltage_data = np.array(data_buffer) / ADC_MAX * VOLTAGE_RANGE
+
+                # Apply notch filter
+                filtered_voltage = apply_notch_filter(voltage_data, fs, freq, Q)
+                
+                # Remove DC offset
+                filtered_voltage -= np.mean(filtered_voltage)
+
+                filtered_buffer = filtered_voltage.tolist()
+
+                # Plot Filtered EEG Signal
+                filtered_points = []
+                for i, value in enumerate(filtered_buffer):
+                    y = int(map_value(value, -VOLTAGE_RANGE / 2, VOLTAGE_RANGE / 2,
+                                      MIDPOINT - (WINDOW_HEIGHT * VERTICAL_SCALE // 2),
+                                      MIDPOINT + (WINDOW_HEIGHT * VERTICAL_SCALE // 2)))
+                    y = max(0, min(WINDOW_HEIGHT - 1, y))  # Ensure y is within screen bounds
+                    filtered_points.append((i, y))
+
+                if len(filtered_points) >= 2:
+                    pygame.draw.lines(screen, FILTERED_LINE_COLOR, False, filtered_points, 1)
+
+                # Perform FFT
+                fft_data = np.fft.rfft(filtered_voltage)
+                fft_magnitude = np.abs(fft_data) / FFT_SIZE
+                freqs = np.fft.rfftfreq(FFT_SIZE, d=1.0/fs)
+
+                # Limit FFT to 0-70 Hz for display
+                indices = np.where(freqs <= MAX_FFT_FREQ)
+                freqs = freqs[indices]
+                fft_magnitude = fft_magnitude[indices]
+
+                # Normalize FFT magnitude for display
+                if np.max(fft_magnitude) != 0:
+                    fft_magnitude_display = fft_magnitude / np.max(fft_magnitude) * (FREQ_DISPLAY_HEIGHT - 20)  # Subtract padding
+                else:
+                    fft_magnitude_display = fft_magnitude
+
+                # FFT Points
+                fft_points = []
+                for i, mag in enumerate(fft_magnitude_display):
+                    x = BUFFER_SIZE + int((freqs[i] / MAX_FFT_FREQ) * (WINDOW_WIDTH - BUFFER_SIZE - 200))  # Leave space for indicators
+                    y = WINDOW_HEIGHT - int(mag) - 10  # Offset for padding
+                    fft_points.append((x, y))
+
+                if len(fft_points) >= 2:
+                    pygame.draw.lines(screen, FFT_COLOR, False, fft_points, 1)
+
+                # Calculate EEG Band Powers
+                band_powers = calculate_eeg_band_powers(freqs, fft_magnitude, EEG_BANDS)
+
+                # Draw EEG Band Indicators
+                draw_eeg_band_indicators(band_powers, font)
+
+            # Draw FFT Boundary Line
+            pygame.draw.line(screen, (100, 100, 100), (BUFFER_SIZE, 0), (BUFFER_SIZE, WINDOW_HEIGHT), 1)
+
+            # Render Instructions
+            instructions = font.render("Filtered EEG Signal", True, (255, 255, 255))
+            screen.blit(instructions, (10, 10))
+
+            pygame.display.flip()
+            clock.tick(60)  # 60 FPS
+
     except KeyboardInterrupt:
-        print("Interrupted by user.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-    finally:
-        if 'eeg_handler' in locals():
-            eeg_handler.close()
+        stop_thread = True
+        thread.join()
+        ser.close()
         pygame.quit()
         sys.exit()
 
