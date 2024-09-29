@@ -5,11 +5,12 @@ from scipy import signal
 import threading
 from collections import deque
 import sys
+import struct
 
 # ====================== Configuration Parameters ======================
 
 SERIAL_PORT = 'COM12'  # Replace with your Arduino's serial port
-BAUD_RATE = 115200
+BAUD_RATE = 1000000  # Baud rate must match Arduino
 SAMPLING_FREQ = 5000.0  # Hz, must match Arduino
 BUFFER_SIZE = 5000  # Number of samples to display (1 second of data)
 DISPLAY_WIDTH = 1200
@@ -34,8 +35,6 @@ def butter_bandpass(lowcut, highcut, fs, order=5):
 
 def butter_notch(center_freq, bandwidth, fs, order=2):
     nyq = 0.5 * fs
-    low = (center_freq - bandwidth / 2) / nyq
-    high = (center_freq + bandwidth / 2) / nyq
     b, a = signal.iirnotch(center_freq / nyq, Q=center_freq / bandwidth)
     return b, a
 
@@ -72,13 +71,16 @@ class EEGDataHandler:
     def read_serial(self):
         while self.running:
             try:
-                line = self.serial_port.readline().decode('utf-8').strip()
-                if line:
-                    value = float(line)
+                # Read two bytes for each sample
+                bytes_to_read = 2
+                data = self.serial_port.read(bytes_to_read)
+                if len(data) == bytes_to_read:
+                    # Unpack little endian unsigned short (uint16_t)
+                    value = struct.unpack('<H', data)[0]
                     with self.lock:
                         self.data_buffer.append(value)
-            except ValueError:
-                print(f"Received non-float data: {line}")
+            except struct.error:
+                print(f"Incomplete data received.")
             except Exception as e:
                 print(f"Error reading serial data: {e}")
                 self.running = False
@@ -89,10 +91,13 @@ class EEGDataHandler:
         
         if len(data) < self.buffer_size:
             # Pad with zeros if buffer is not full yet
-            data = [0.0] * (self.buffer_size - len(data)) + data
+            data = [0] * (self.buffer_size - len(data)) + data
         
         # Convert to numpy array for filtering
-        data_np = np.array(data)
+        data_np = np.array(data, dtype=np.float32)
+
+        # Normalize ADC values (0-1023) to voltage (assuming 5V reference)
+        data_np = (data_np / 1023.0) * 5.0
 
         # Apply bandpass filter
         filtered = apply_filter(data_np, self.b_bandpass, self.a_bandpass)
@@ -127,10 +132,9 @@ class EEGVisualizer:
         self.bands_height = int(self.height * 0.15)
     
     def draw_eeg_waveform(self, data):
-        if np.max(np.abs(data)) != 0:
-            normalized_data = data / np.max(np.abs(data)) * (self.waveform_height / 2 - 20)
-        else:
-            normalized_data = data
+        scaling_factor = self.waveform_height / 2 / 1.0  # Assuming EEG signals are in ±1 mV range
+        normalized_data = data * scaling_factor
+
         points = [
             (int(i * self.width / len(data)), int(self.waveform_height / 2 - d))
             for i, d in enumerate(normalized_data)
@@ -156,10 +160,7 @@ class EEGVisualizer:
         magnitude = magnitude[freq_mask]
         
         # Normalize magnitude for visualization
-        if np.max(magnitude) != 0:
-            magnitude = magnitude / np.max(magnitude) * self.fft_height
-        else:
-            magnitude = magnitude
+        magnitude = magnitude / np.max(magnitude) * self.fft_height if np.max(magnitude) != 0 else magnitude
 
         # Scale frequency to fit the display width
         scaled_freqs = (freqs / 35.0) * self.width
@@ -167,7 +168,7 @@ class EEGVisualizer:
             (int(f), self.waveform_height + self.fft_height - int(m))
             for f, m in zip(scaled_freqs, magnitude)
         ]
-        pygame.draw.lines(self.screen, (255, 165, 0), False, points, 1)  # Orange color
+        pygame.draw.lines(self.screen, (255, 165, 0), False, points, 1)
         
         # Label
         label = self.font.render("FFT (0.5-35 Hz)", True, (255, 255, 255))
@@ -200,13 +201,7 @@ class EEGVisualizer:
             
             # Display band name and power
             text = self.font.render(f"{band}: {band_power:.2f}", True, (255, 255, 255))
-            self.screen.blit(
-                text,
-                (
-                    i * bar_width + 10,
-                    self.waveform_height + self.fft_height + 5
-                )
-            )
+            self.screen.blit(text, (i * bar_width + 10, self.waveform_height + self.fft_height + 5))
     
     def get_band_color(self, band):
         colors = {
