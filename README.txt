@@ -7,9 +7,5 @@ Cognitive
 Assessment of
 Neural patterns
 
-pip install numpy pillow bleak PyQt5 opencv-python 
+pip install numpy pygame pyserial scipy scikit-learn joblib
 
-
-
-import uuid
-print(str(uuid.uuid4()))
